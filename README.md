@@ -35,7 +35,7 @@ AcquiredAgent aims to make the wealth of knowledge from Acquired FM's episodes m
 
 1. Clone the repository:
 ```
-git clone https://github.com/your-username/AcquiredAgent.git cd AcquiredAgent
+git clone https://github.com/your-username/AcquiredAgent.git && cd AcquiredAgent
 ```
 2. Install required packages:
 ```
