@@ -40,7 +40,6 @@ def process_transcripts():
         )
 
     try:
-        # Create PROCESSED_DATA_DIR if it doesn't exist
         os.makedirs(PROCESSED_DATA_DIR, exist_ok=True)
 
         if os.path.exists(os.path.join(PROCESSED_DATA_DIR, "docstore.json")):
