@@ -46,7 +46,7 @@ pip install -r requirements.txt
 ### Usage
 
 1. Run ingestion script: python src/ingest.py
-2. Start conversational agent: python src/app.py
+2. Start conversational agent: python src/process_and_query.py
 3. Interact with the agent via command line or preferred chat interface
 
 ## Contributing
