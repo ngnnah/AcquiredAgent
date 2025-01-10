@@ -7,23 +7,63 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.util.retry import Retry
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 
 STATUS_FILE = "data/download_transcripts_status.json"
 
 
-def get_transcript_urls():
-    base_url = "https://www.philosophizethis.org/transcripts"
-    response = requests.get(base_url)
-    soup = BeautifulSoup(response.content, "html.parser")
+def get_transcript_urls(existing_urls):
+    base_url = "https://www.acquired.fm/episodes"
+    driver = webdriver.Chrome()  # Make sure you have ChromeDriver installed and in PATH
+    driver.get(base_url)
 
     transcript_links = []
-    for link in soup.find_all("a"):
-        href = link.get("href")
-        if href and "/transcript/" in href:
-            if not href.startswith(("http:", "https:")):
-                href = "https://www.philosophizethis.org" + href
-            transcript_links.append(href)
+    page = 1
+    new_episodes_found = True
 
+    while new_episodes_found:
+        new_episodes_found = False
+        # Wait for the page to load
+        WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.CLASS_NAME, "collection-list"))
+        )
+
+        # Parse the page content
+        soup = BeautifulSoup(driver.page_source, "html.parser")
+
+        # Find all episode links
+        episodes = soup.find_all("div", class_="blog-thumbnail")
+        for episode in episodes:
+            link = episode.find("a")["href"]
+            full_link = f"https://www.acquired.fm{link}"
+            if full_link not in existing_urls:
+                transcript_links.append(full_link)
+                new_episodes_found = True
+
+        print(
+            f"Collected {len(transcript_links)} new links from page {page}; Samples: {transcript_links[-3:]}"
+        )
+
+        if new_episodes_found:
+            # Check if there's a next page
+            try:
+                older_button = driver.find_element(
+                    By.XPATH, "//a[contains(@class, 'w-pagination-next')]"
+                )
+                older_button.click()
+                page += 1
+                time.sleep(2)  # Wait for the page to load
+            except:
+                print("No more pages to load")
+                break
+        else:
+            print("No new episodes found on this page. Stopping search.")
+            break
+
+    driver.quit()
     return transcript_links
 
 
@@ -79,16 +119,14 @@ def save_status(status):
 def ingest_data():
     print("Starting data ingestion...")
 
-    transcript_urls = get_transcript_urls()
-    print(f"Found {len(transcript_urls)} transcript URLs.")
+    status = load_status()
+    existing_urls = set(status.keys())
+
+    new_transcript_urls = get_transcript_urls(existing_urls)
+    print(f"Found {len(new_transcript_urls)} new transcript URLs.")
 
     raw_dir = "./data/raw_transcripts"
     os.makedirs(raw_dir, exist_ok=True)
-
-    status = load_status()
-    urls_to_fetch = [
-        url for url in transcript_urls if url not in status or not status[url]
-    ]
 
     session = get_session()
     successful_saves = 0
@@ -96,12 +134,11 @@ def ingest_data():
     with ThreadPoolExecutor(max_workers=5) as executor:
         future_to_url = {
             executor.submit(fetch_transcript, url, session): url
-            for url in urls_to_fetch
+            for url in new_transcript_urls
         }
-
         for future in tqdm(
             as_completed(future_to_url),
-            total=len(urls_to_fetch),
+            total=len(new_transcript_urls),
             desc="Fetching and saving transcripts",
         ):
             url = future_to_url[future]
@@ -116,10 +153,10 @@ def ingest_data():
             save_status(status)
 
     print(
-        f"Successfully saved {successful_saves} out of {len(urls_to_fetch)} new transcripts in {raw_dir}"
+        f"Successfully saved {successful_saves} out of {len(new_transcript_urls)} new transcripts in {raw_dir}"
     )
     print(
-        f"Total transcripts: {len(transcript_urls)}, Already downloaded: {len(transcript_urls) - len(urls_to_fetch)}"
+        f"Total transcripts: {len(status)}, Newly downloaded: {len(new_transcript_urls)}"
     )
 
 
