@@ -33,60 +33,73 @@ def process_transcripts():
     test_embedding = Settings.embed_model.get_text_embedding("Test embedding")
     if test_embedding is None:
         print("Error: Embedding model failed to generate test embedding")
+        return None
     else:
         print(
             f"Debug: Test embedding generated successfully. Shape: {np.array(test_embedding).shape}"
         )
 
-    if os.path.exists(PROCESSED_DATA_DIR):
-        print(f"Loading existing index from {PROCESSED_DATA_DIR}...")
-        storage_context = StorageContext.from_defaults(persist_dir=PROCESSED_DATA_DIR)
-        index = load_index_from_storage(storage_context)
+    try:
+        # Create PROCESSED_DATA_DIR if it doesn't exist
+        os.makedirs(PROCESSED_DATA_DIR, exist_ok=True)
 
-        existing_docs = set(
-            os.path.basename(doc.metadata["file_name"])
-            for doc in index.docstore.docs.values()
-        )
-        all_docs = set(os.listdir(RAW_DATA_DIR))
-        new_docs = all_docs - existing_docs
+        if os.path.exists(os.path.join(PROCESSED_DATA_DIR, "docstore.json")):
+            print(f"Loading existing index from {PROCESSED_DATA_DIR}...")
+            storage_context = StorageContext.from_defaults(
+                persist_dir=PROCESSED_DATA_DIR
+            )
+            index = load_index_from_storage(storage_context)
 
-        if new_docs:
-            print(f"Found {len(new_docs)} new documents. Updating index...")
-            reader = SimpleDirectoryReader(RAW_DATA_DIR, filename_as_id=True)
-            documents = [
-                doc
-                for doc in reader.load_data()
-                if os.path.basename(doc.metadata["file_name"]) in new_docs
-            ]
-            parser = SimpleNodeParser.from_defaults()
-            nodes = parser.get_nodes_from_documents(documents)
-            index.insert_nodes(nodes)
+            existing_docs = set(
+                os.path.basename(doc.metadata["file_name"])
+                for doc in index.docstore.docs.values()
+            )
+            all_docs = set(os.listdir(RAW_DATA_DIR))
+            new_docs = all_docs - existing_docs
+
+            if new_docs:
+                print(f"Found {len(new_docs)} new documents. Updating index...")
+                reader = SimpleDirectoryReader(RAW_DATA_DIR, filename_as_id=True)
+                documents = [
+                    doc
+                    for doc in reader.load_data()
+                    if os.path.basename(doc.metadata["file_name"]) in new_docs
+                ]
+                parser = SimpleNodeParser.from_defaults()
+                nodes = parser.get_nodes_from_documents(documents)
+                index.insert_nodes(nodes)
+                index.storage_context.persist(persist_dir=PROCESSED_DATA_DIR)
+            else:
+                print("No new documents found. Index is up to date.")
         else:
-            print("No new documents found. Index is up to date.")
-    else:
-        print(f"Creating new index from {RAW_DATA_DIR}...")
-        documents = SimpleDirectoryReader(RAW_DATA_DIR, filename_as_id=True).load_data()
-        index = VectorStoreIndex.from_documents(documents)
+            print(f"Creating new index from {RAW_DATA_DIR}...")
+            documents = SimpleDirectoryReader(
+                RAW_DATA_DIR, filename_as_id=True
+            ).load_data()
+            index = VectorStoreIndex.from_documents(documents)
+            index.storage_context.persist(persist_dir=PROCESSED_DATA_DIR)
 
-    index.storage_context.persist(persist_dir=PROCESSED_DATA_DIR)
-    print(
-        f"Index {'updated' if os.path.exists(PROCESSED_DATA_DIR) else 'created'} and saved to {PROCESSED_DATA_DIR}"
-    )
+        print(
+            f"Index {'updated' if os.path.exists(os.path.join(PROCESSED_DATA_DIR, 'docstore.json')) else 'created'} and saved to {PROCESSED_DATA_DIR}"
+        )
 
-    print("Debug: Checking if embed_model is set in Settings")
-    if hasattr(Settings, "embed_model"):
-        print(f"Debug: embed_model is set: {type(Settings.embed_model)}")
-    else:
-        print("Error: embed_model is not set in Settings")
+        print("Debug: Checking if embed_model is set in Settings")
+        if hasattr(Settings, "embed_model"):
+            print(f"Debug: embed_model is set: {type(Settings.embed_model)}")
+        else:
+            print("Error: embed_model is not set in Settings")
 
-    return index
+        return index
+
+    except Exception as e:
+        print(f"Error processing transcripts: {e}")
+        return None
 
 
 def query_index(index, query_text):
     query_engine = index.as_query_engine()
 
-    # Debug: Print query text and check embedding
-    print(f"Debug: Query text: {query_text}")
+    # Debug: check embedding
     query_embedding = Settings.embed_model.get_text_embedding(query_text)
     if query_embedding is None:
         print("Error: Failed to generate query embedding")
@@ -168,9 +181,22 @@ def display_conversation_embedding(index, conversation):
 
 
 def chat_loop(index):
-    print("Welcome to PhiloBot! Type 'exit' to end the conversation.")
-    print("Type 'show index' to display current index information.")
-    print("Type 'show embedding' to display current conversation embedding.")
+    print(
+        """
+Welcome to AcquiredAgent, your AI guide to the world of Acquired FM!
+
+🚀 Dive into the strategies of tech giants and unicorns
+📚 Access insights from 3-4 hour "conversational audiobooks"
+🎙️ Explore episodes featuring titans like NVIDIA, Berkshire Hathaway, and Meta
+
+I'm here to help you navigate the #1 Technology show's vast knowledge base. 
+What would you like to know about great companies and their success stories?
+
+(Type 'exit' when you're ready to conclude our chat.)
+(Type 'show index' to display current index information.)
+(Type 'show embedding' to display current conversation embedding.)
+"""
+    )
     conversation = []
     while True:
         user_input = input("You: ")
