@@ -1,11 +1,12 @@
 import os
+import json
 import numpy as np
 from llama_index.core import (
     VectorStoreIndex,
-    SimpleDirectoryReader,
     StorageContext,
     load_index_from_storage,
     Settings,
+    Document,
 )
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.llms.ollama import Ollama
@@ -20,6 +21,46 @@ RAW_DATA_DIR = "./data/raw_transcripts"
 PROCESSED_DATA_DIR = "./data/processed_index"
 OLLAMA_MODEL = "nhat:latest"
 LLM_TIMEOUT = 60.0
+
+
+def load_json_files(directory):
+    documents = []
+    for filename in os.listdir(directory):
+        if filename.endswith(".json"):
+            with open(os.path.join(directory, filename), "r") as file:
+                data = json.load(file)
+
+                # Create metadata document
+                metadata_text = f"Title: {data['title']}\n"
+                metadata_text += f"Date: {data['date']}\n"
+                metadata_text += f"Heading: {data['heading']}\n"
+                metadata_text += f"URL: {data['url']}\n"
+                metadata_text += f"Description: {data['description']}\n"
+
+                metadata_doc = Document(
+                    text=metadata_text,
+                    metadata={
+                        "type": "metadata",
+                        "title": data["title"],
+                        "date": data["date"],
+                        "file_name": filename,
+                    },
+                )
+                documents.append(metadata_doc)
+
+                # Create transcript document
+                transcript_doc = Document(
+                    text=data["transcript"],
+                    metadata={
+                        "type": "transcript",
+                        "title": data["title"],
+                        "date": data["date"],
+                        "file_name": filename,
+                    },
+                )
+                documents.append(transcript_doc)
+
+    return documents
 
 
 def process_transcripts():
@@ -50,31 +91,30 @@ def process_transcripts():
             index = load_index_from_storage(storage_context)
 
             existing_docs = set(
-                os.path.basename(doc.metadata["file_name"])
+                doc.metadata["file_name"]
                 for doc in index.docstore.docs.values()
+                if "file_name" in doc.metadata
             )
+
             all_docs = set(os.listdir(RAW_DATA_DIR))
             new_docs = all_docs - existing_docs
 
             if new_docs:
                 print(f"Found {len(new_docs)} new documents. Updating index...")
-                reader = SimpleDirectoryReader(RAW_DATA_DIR, filename_as_id=True)
-                documents = [
+                new_documents = [
                     doc
-                    for doc in reader.load_data()
-                    if os.path.basename(doc.metadata["file_name"]) in new_docs
+                    for doc in load_json_files(RAW_DATA_DIR)
+                    if doc.metadata["file_name"] in new_docs
                 ]
                 parser = SimpleNodeParser.from_defaults()
-                nodes = parser.get_nodes_from_documents(documents)
+                nodes = parser.get_nodes_from_documents(new_documents)
                 index.insert_nodes(nodes)
                 index.storage_context.persist(persist_dir=PROCESSED_DATA_DIR)
             else:
                 print("No new documents found. Index is up to date.")
         else:
             print(f"Creating new index from {RAW_DATA_DIR}...")
-            documents = SimpleDirectoryReader(
-                RAW_DATA_DIR, filename_as_id=True
-            ).load_data()
+            documents = load_json_files(RAW_DATA_DIR)
             index = VectorStoreIndex.from_documents(documents)
             index.storage_context.persist(persist_dir=PROCESSED_DATA_DIR)
 
