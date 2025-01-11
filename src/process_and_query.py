@@ -1,6 +1,7 @@
 import os
 import json
 import numpy as np
+from datetime import datetime
 from llama_index.core import (
     VectorStoreIndex,
     StorageContext,
@@ -23,12 +24,42 @@ OLLAMA_MODEL = "nhat:latest"
 LLM_TIMEOUT = 60.0
 
 
+class EpisodeMetadata:
+    def __init__(self):
+        self.episodes = []
+        self.oldest_episode = None
+        self.latest_episode = None
+
+    def add_episode(self, title, date, url):
+        episode_date = datetime.strptime(date, "%B %d, %Y")
+        self.episodes.append({"title": title, "date": episode_date, "url": url})
+
+        if not self.oldest_episode or episode_date < self.oldest_episode["date"]:
+            self.oldest_episode = {"title": title, "date": episode_date, "url": url}
+
+        if not self.latest_episode or episode_date > self.latest_episode["date"]:
+            self.latest_episode = {"title": title, "date": episode_date, "url": url}
+
+    def get_metadata_summary(self):
+        return f"""
+        Total Episodes: {len(self.episodes)}
+        Oldest Episode: {self.oldest_episode['title']} ({self.oldest_episode['date'].strftime('%B %d, %Y')})
+        Latest Episode: {self.latest_episode['title']} ({self.latest_episode['date'].strftime('%B %d, %Y')})
+        """
+
+
+episode_metadata = EpisodeMetadata()
+
+
 def load_json_files(directory):
     documents = []
     for filename in os.listdir(directory):
         if filename.endswith(".json"):
             with open(os.path.join(directory, filename), "r") as file:
                 data = json.load(file)
+
+                # Add episode to metadata
+                episode_metadata.add_episode(data["title"], data["date"], data["url"])
 
                 # Create metadata document
                 metadata_text = f"Title: {data['title']}\n"
@@ -59,6 +90,13 @@ def load_json_files(directory):
                     },
                 )
                 documents.append(transcript_doc)
+
+    # Add overall metadata summary
+    metadata_summary = Document(
+        text=episode_metadata.get_metadata_summary(),
+        metadata={"type": "metadata_summary"},
+    )
+    documents.append(metadata_summary)
 
     return documents
 
@@ -101,11 +139,7 @@ def process_transcripts():
 
             if new_docs:
                 print(f"Found {len(new_docs)} new documents. Updating index...")
-                new_documents = [
-                    doc
-                    for doc in load_json_files(RAW_DATA_DIR)
-                    if doc.metadata["file_name"] in new_docs
-                ]
+                new_documents = load_json_files(RAW_DATA_DIR)
                 parser = SimpleNodeParser.from_defaults()
                 nodes = parser.get_nodes_from_documents(new_documents)
                 index.insert_nodes(nodes)
@@ -251,7 +285,6 @@ What would you like to know about great companies and their success stories?
         conversation.append(user_input)
         response, source_nodes = query_index(index, user_input)
         conversation.append(response)
-        print("\nPhiloBot:")
         print(response)
 
         print("\nSource Nodes:")
@@ -276,4 +309,9 @@ if __name__ == "__main__":
     else:
         print("Warning: No documents found in the index.")
 
+    # sample convo: Yay!
+    # You: how many episodes and which one is newest and oldest
+    # Detailed Answer:
+    # There are a total of 288 episodes. The oldest episode is Pixar from October 15, 2015, and the latest episode is Mars Inc. (the chocolate story) from December 15, 2024.
+    # TLDR: There are 288 episodes, with Pixar as the oldest episode from October 15, 2015, and Mars Inc. (the chocolate story) being the latest one from December 15, 2024.
     chat_loop(index)
