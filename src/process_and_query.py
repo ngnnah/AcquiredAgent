@@ -18,6 +18,9 @@ from llama_index.core.schema import NodeWithScore
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.llms.ollama import Ollama
 from llama_index.core.node_parser import SimpleNodeParser
+from llama_index.core.query_engine import RetrieverQueryEngine
+from llama_index.core.response_synthesizers import TreeSummarize
+
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -320,9 +323,16 @@ def process_transcripts():
 
 
 def query_index(index, query_text):
+    print(f"Type of index: {type(index)}")
     hybrid_retriever = HybridRetriever(index, METADATA_DB)
-    query_engine = index.as_query_engine(
-        retriever=hybrid_retriever, response_mode="tree_summarize"
+
+    # Create a response synthesizer
+    response_synthesizer = TreeSummarize(verbose=True)
+
+    # Create the query engine directly
+    query_engine = RetrieverQueryEngine(
+        retriever=hybrid_retriever,
+        response_synthesizer=response_synthesizer,
     )
 
     # Debug: check embedding
