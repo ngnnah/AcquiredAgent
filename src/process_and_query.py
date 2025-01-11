@@ -1,3 +1,7 @@
+import sqlite3
+import pandas as pd
+from datetime import datetime
+from typing import List
 import os
 import json
 import numpy as np
@@ -9,6 +13,8 @@ from llama_index.core import (
     Settings,
     Document,
 )
+from llama_index.core.retrievers import BaseRetriever
+from llama_index.core.schema import NodeWithScore
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.llms.ollama import Ollama
 from llama_index.core.node_parser import SimpleNodeParser
@@ -20,8 +26,76 @@ load_dotenv()
 # Constants
 RAW_DATA_DIR = "./data/raw_transcripts"
 PROCESSED_DATA_DIR = "./data/processed_index"
+METADATA_DB = "./data/episode_metadata.db"
 OLLAMA_MODEL = "nhat:latest"
 LLM_TIMEOUT = 60.0
+
+
+def init_metadata_db():
+    conn = sqlite3.connect(METADATA_DB)
+    c = conn.cursor()
+    c.execute(
+        """CREATE TABLE IF NOT EXISTS episodes
+                 (id INTEGER PRIMARY KEY, title TEXT, date DATE, url TEXT)"""
+    )
+    conn.commit()
+    conn.close()
+
+
+def insert_episode_metadata(title, date, url):
+    conn = sqlite3.connect(METADATA_DB)
+    c = conn.cursor()
+    parsed_date = parse_date(date)
+    c.execute(
+        "INSERT OR REPLACE INTO episodes (title, date, url) VALUES (?, ?, ?)",
+        (title, parsed_date.strftime("%Y-%m-%d"), url),
+    )
+    conn.commit()
+    conn.close()
+
+
+def parse_date(date_string):
+    try:
+        return datetime.strptime(date_string, "%B %d, %Y")
+    except ValueError:
+        print(
+            f"Warning: Unable to parse date '{date_string}'. Using current date instead."
+        )
+        return datetime.now()
+
+
+def generate_metadata_summary():
+    conn = sqlite3.connect(METADATA_DB)
+    df = pd.read_sql_query("SELECT * FROM episodes", conn)
+    conn.close()
+
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+
+    if df["date"].isnull().all():
+        print(
+            "Warning: All dates are invalid. Please check the date format in your JSON files."
+        )
+        return "Error: Unable to generate metadata summary due to invalid dates."
+
+    summary = f"""
+    Metadata Summary for Acquired FM Episodes:
+    
+    Total Episodes: {len(df)}
+    Date Range: From {df['date'].min().strftime('%B %d, %Y')} to {df['date'].max().strftime('%B %d, %Y')}
+    
+    Newest Episode: {df.loc[df['date'].idxmax(), 'title']} ({df['date'].max().strftime('%B %d, %Y')})
+    Oldest Episode: {df.loc[df['date'].idxmin(), 'title']} ({df['date'].min().strftime('%B %d, %Y')})
+    
+    5 Most Recent Episodes:
+    {df.sort_values('date', ascending=False).head(5)[['title', 'date']].to_string(index=False)}
+    
+    Episodes by Year:
+    {df['date'].dt.year.value_counts().sort_index().to_string()}
+    
+    This summary provides an overview of the Acquired FM episode collection. For more specific queries,
+    you can ask about episodes from a particular year, date range, or any other metadata-related question.
+    """
+    return summary
 
 
 class EpisodeMetadata:
@@ -91,14 +165,51 @@ def load_json_files(directory):
                 )
                 documents.append(transcript_doc)
 
-    # Add overall metadata summary
-    metadata_summary = Document(
-        text=episode_metadata.get_metadata_summary(),
-        metadata={"type": "metadata_summary"},
-    )
-    documents.append(metadata_summary)
-
     return documents
+
+
+class HybridRetriever(BaseRetriever):
+    def __init__(self, vector_index, metadata_db):
+        self.vector_index = vector_index
+        self.metadata_db = metadata_db
+
+    def _retrieve(self, query_str: str, **kwargs) -> List[NodeWithScore]:
+        # Always include the metadata summary
+        metadata_summary = generate_metadata_summary()
+        metadata_node = NodeWithScore(
+            node=Document(
+                text=metadata_summary, metadata={"source": "metadata_summary"}
+            ),
+            score=1.0,
+        )
+
+        # Retrieve from vector index
+        vector_results = self.vector_index.as_retriever().retrieve(query_str)
+
+        # Combine results, putting metadata summary first
+        return [metadata_node] + vector_results
+
+    def query_metadata(self, query_str: str) -> str:
+        conn = sqlite3.connect(self.metadata_db)
+
+        try:
+            # Use the LLM to generate an SQL query based on the natural language question
+            sql_query = Settings.llm.complete(
+                f"Generate an SQL query to answer the following question about podcast episodes: {query_str}\nSQL query:"
+            ).text
+
+            # Execute the generated SQL query
+            df = pd.read_sql_query(sql_query, conn)
+
+            # Format the results
+            if len(df) > 0:
+                return f"Query results:\n{df.to_string()}"
+            else:
+                return "No results found for the given query."
+        except Exception as e:
+            return f"Error executing query: {str(e)}"
+        finally:
+            conn.close()
 
 
 def process_transcripts():
@@ -119,6 +230,9 @@ def process_transcripts():
         )
 
     try:
+        # Initialize metadata database
+        init_metadata_db()
+
         os.makedirs(PROCESSED_DATA_DIR, exist_ok=True)
 
         if os.path.exists(os.path.join(PROCESSED_DATA_DIR, "docstore.json")):
@@ -140,15 +254,48 @@ def process_transcripts():
             if new_docs:
                 print(f"Found {len(new_docs)} new documents. Updating index...")
                 new_documents = load_json_files(RAW_DATA_DIR)
+                for doc in new_documents:
+                    if doc.metadata.get("type") == "metadata":
+                        # Insert metadata into SQLite database
+                        insert_episode_metadata(
+                            doc.metadata["title"],
+                            doc.metadata["date"],
+                            doc.metadata.get("url", ""),
+                        )
+
                 parser = SimpleNodeParser.from_defaults()
                 nodes = parser.get_nodes_from_documents(new_documents)
                 index.insert_nodes(nodes)
+
+                # Generate and update metadata summary
+                metadata_summary = generate_metadata_summary()
+                summary_node = Document(
+                    text=metadata_summary, metadata={"type": "metadata_summary"}
+                )
+                index.insert(summary_node)
+
                 index.storage_context.persist(persist_dir=PROCESSED_DATA_DIR)
             else:
                 print("No new documents found. Index is up to date.")
         else:
             print(f"Creating new index from {RAW_DATA_DIR}...")
             documents = load_json_files(RAW_DATA_DIR)
+            for doc in documents:
+                if doc.metadata.get("type") == "metadata":
+                    # Insert metadata into SQLite database
+                    insert_episode_metadata(
+                        doc.metadata["title"],
+                        doc.metadata["date"],
+                        doc.metadata.get("url", ""),
+                    )
+
+            # Generate metadata summary
+            metadata_summary = generate_metadata_summary()
+            summary_doc = Document(
+                text=metadata_summary, metadata={"type": "metadata_summary"}
+            )
+            documents.append(summary_doc)
+
             index = VectorStoreIndex.from_documents(documents)
             index.storage_context.persist(persist_dir=PROCESSED_DATA_DIR)
 
@@ -166,11 +313,17 @@ def process_transcripts():
 
     except Exception as e:
         print(f"Error processing transcripts: {e}")
+        import traceback
+
+        traceback.print_exc()
         return None
 
 
 def query_index(index, query_text):
-    query_engine = index.as_query_engine()
+    hybrid_retriever = HybridRetriever(index, METADATA_DB)
+    query_engine = index.as_query_engine(
+        retriever=hybrid_retriever, response_mode="tree_summarize"
+    )
 
     # Debug: check embedding
     query_embedding = Settings.embed_model.get_text_embedding(query_text)
@@ -187,20 +340,17 @@ def query_index(index, query_text):
 
     # Second query for TLDR and follow-up questions
     followup_query = f"""Based on the following answer to the question "{query_text}", please provide:
-1. A brief TLDR summary (2-3 sentences)
-2. Three suggested follow-up questions
-
-Answer:
-{main_response.response}
-
-Format your response exactly as follows:
-TLDR: [Your TLDR here]
-
-Suggested Follow-up Questions:
-1. [First follow-up question]
-2. [Second follow-up question]
-3. [Third follow-up question]
-"""
+    1. A brief TLDR summary (2-3 sentences)
+    2. Three suggested follow-up questions
+    Answer:
+    {main_response.response}
+    Format your response exactly as follows:
+    TLDR: [Your TLDR here]
+    Suggested Follow-up Questions:
+    1. [First follow-up question]
+    2. [Second follow-up question]
+    3. [Third follow-up question]
+    """
 
     try:
         followup_response = query_engine.query(followup_query)
@@ -210,15 +360,15 @@ Suggested Follow-up Questions:
 
     # Combine the responses
     formatted_response = f"""Detailed Answer:
-{main_response.response}
-
-{followup_response.response if followup_response else "Error: Unable to generate follow-up information."}
-"""
+    {main_response.response}
+    {followup_response.response if followup_response else "Error: Unable to generate follow-up information."}
+    """
 
     # Combine source nodes from both queries
     all_source_nodes = main_response.source_nodes + (
         followup_response.source_nodes if followup_response else []
     )
+
     # Remove duplicates while preserving order
     unique_source_nodes = []
     seen = set()
